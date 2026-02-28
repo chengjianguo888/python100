@@ -1,8 +1,9 @@
 """
-激光角点提取系统
+激光角点提取系统  v2.0
 Laser Corner Extraction System
 
 一个基于 OpenCV 的激光图像角点提取 GUI 软件，支持多种角点检测与边缘检测算法。
+v2.0 新增：高斯预处理、CLAHE 增强、亚像素精化、ORB 检测、热力图叠加、CSV 导出。
 
 使用方法:
     pip install -r requirements.txt
@@ -13,6 +14,7 @@ Laser Corner Extraction System
     用户名: user   密码: user123
 """
 
+import csv
 import hashlib
 import os
 import tkinter as tk
@@ -24,9 +26,25 @@ import numpy as np
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from PIL import Image, ImageTk
 
+
 def _hash_password(password: str) -> str:
     """Return the SHA-256 hex digest of *password*."""
     return hashlib.sha256(password.encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Drawing helpers
+# ---------------------------------------------------------------------------
+
+def _draw_corner(img: np.ndarray, x: int, y: int, color, r: int = 8) -> None:
+    """Draw a crosshair + ring marker for a single corner point."""
+    cv2.circle(img, (x, y), r, color, 1, cv2.LINE_AA)
+    cv2.circle(img, (x, y), 2, color, -1, cv2.LINE_AA)
+    arm = r + 4
+    cv2.line(img, (x - arm, y), (x - r + 1, y), color, 1, cv2.LINE_AA)
+    cv2.line(img, (x + r - 1, y), (x + arm, y), color, 1, cv2.LINE_AA)
+    cv2.line(img, (x, y - arm), (x, y - r + 1), color, 1, cv2.LINE_AA)
+    cv2.line(img, (x, y + r - 1), (x, y + arm), color, 1, cv2.LINE_AA)
 
 
 # ---------------------------------------------------------------------------
@@ -37,6 +55,10 @@ USERS = {
     "admin": _hash_password("admin123"),
     "user":  _hash_password("user123"),
 }
+
+# Sub-pixel refinement criteria used by Harris and Shi-Tomasi
+_SUBPIX_CRITERIA = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.001)
+_SUBPIX_WIN = (5, 5)
 
 
 # ---------------------------------------------------------------------------
@@ -161,11 +183,12 @@ class LaserCornerExtractionApp:
         self._src_img = None       # original BGR image (numpy array)
         self._result_img = None    # processed BGR image (numpy array)
         self._corners = []         # list of (x, y) tuples
+        self._corner_responses = []  # response strengths (float) per corner
         self._tk_img_orig = None   # PhotoImage reference (prevents GC)
         self._tk_img_proc = None
 
         self.root.title(f"激光角点提取系统  –  当前用户: {username}")
-        self.root.geometry("1280x820")
+        self.root.geometry("1360x860")
 
         self._build_menu()
         self._build_ui()
@@ -194,6 +217,8 @@ class LaserCornerExtractionApp:
         pm.add_command(label="Harris 角点检测", command=lambda: self._detect("Harris"))
         pm.add_command(label="Shi-Tomasi 角点检测", command=lambda: self._detect("Shi-Tomasi"))
         pm.add_command(label="FAST 角点检测", command=lambda: self._detect("FAST"))
+        pm.add_command(label="ORB 特征检测", command=lambda: self._detect("ORB"))
+        pm.add_command(label="激光亮斑角点", command=lambda: self._detect("激光亮斑"))
         pm.add_separator()
         pm.add_command(label="Canny 边缘检测", command=self._canny)
         pm.add_command(label="清除结果", command=self._clear)
@@ -202,6 +227,7 @@ class LaserCornerExtractionApp:
         vm = tk.Menu(mb, tearoff=0)
         mb.add_cascade(label="视图", menu=vm)
         vm.add_command(label="图像直方图", command=self._histogram)
+        vm.add_command(label="导出角点坐标 CSV", command=self._export_csv)
         vm.add_command(label="重置视图", command=self._reset_view)
 
         # Help
@@ -221,7 +247,7 @@ class LaserCornerExtractionApp:
         outer.pack(fill=tk.BOTH, expand=True)
 
         # ── Left control panel ────────────────────────────────────────
-        left = tk.Frame(outer, width=290, bg="#ecf0f1", bd=1, relief=tk.SUNKEN)
+        left = tk.Frame(outer, width=310, bg="#ecf0f1", bd=1, relief=tk.SUNKEN)
         left.pack(side=tk.LEFT, fill=tk.Y, padx=(5, 0), pady=5)
         left.pack_propagate(False)
 
@@ -242,6 +268,30 @@ class LaserCornerExtractionApp:
         tk.Label(lf, textvariable=self._info_var, bg="#ecf0f1",
                  font=("Arial", 9), wraplength=250, justify=tk.LEFT).pack()
 
+        # — Preprocessing section —
+        pref = tk.LabelFrame(left, text="预处理 (激光增强)", font=("Arial", 10), bg="#ecf0f1", padx=5, pady=5)
+        pref.pack(fill=tk.X, padx=6, pady=3)
+
+        self._p_blur = tk.BooleanVar(value=True)
+        blur_row = tk.Frame(pref, bg="#ecf0f1")
+        blur_row.pack(fill=tk.X)
+        tk.Checkbutton(blur_row, text="高斯模糊", variable=self._p_blur,
+                       bg="#ecf0f1", font=("Arial", 9)).pack(side=tk.LEFT)
+        tk.Label(blur_row, text="核:", bg="#ecf0f1", font=("Arial", 9)).pack(side=tk.LEFT)
+        self._p_blur_k = tk.IntVar(value=3)
+        tk.Spinbox(blur_row, from_=1, to=15, increment=2, textvariable=self._p_blur_k,
+                   width=5, font=("Arial", 9)).pack(side=tk.LEFT, padx=2)
+
+        self._p_clahe = tk.BooleanVar(value=False)
+        clahe_row = tk.Frame(pref, bg="#ecf0f1")
+        clahe_row.pack(fill=tk.X)
+        tk.Checkbutton(clahe_row, text="CLAHE 对比度增强", variable=self._p_clahe,
+                       bg="#ecf0f1", font=("Arial", 9)).pack(side=tk.LEFT)
+
+        self._p_subpix = tk.BooleanVar(value=True)
+        tk.Checkbutton(pref, text="亚像素精化 (Harris/Shi-T)", variable=self._p_subpix,
+                       bg="#ecf0f1", font=("Arial", 9)).pack(anchor="w")
+
         # — Algorithm selector —
         af = tk.LabelFrame(left, text="角点检测", font=("Arial", 10), bg="#ecf0f1", padx=5, pady=5)
         af.pack(fill=tk.X, padx=6, pady=6)
@@ -251,7 +301,7 @@ class LaserCornerExtractionApp:
         algo_cb = ttk.Combobox(
             af,
             textvariable=self._algo_var,
-            values=["Harris", "Shi-Tomasi", "FAST"],
+            values=["Harris", "Shi-Tomasi", "FAST", "ORB", "激光亮斑"],
             state="readonly",
             width=24,
         )
@@ -261,10 +311,10 @@ class LaserCornerExtractionApp:
         # Harris params
         self._pf_harris = tk.LabelFrame(af, text="Harris 参数", bg="#ecf0f1", font=("Arial", 9), padx=4, pady=4)
         _row = 0
-        for label, var_name, default, lo, hi, dtype in [
-            ("块大小:", "_p_block",  2,    1, 15,  int),
-            ("K 值:",   "_p_k",     0.04, 0.0,  1.0, float),
-            ("阈  值:", "_p_thresh", 0.01, 0.0,  1.0, float),
+        for label, var_name, default, dtype in [
+            ("块大小:", "_p_block",  2,    int),
+            ("K 值:",   "_p_k",     0.04, float),
+            ("阈  值:", "_p_thresh", 0.01, float),
         ]:
             tk.Label(self._pf_harris, text=label, bg="#ecf0f1", font=("Arial", 9)).grid(
                 row=_row, column=0, sticky="w", pady=2
@@ -275,6 +325,15 @@ class LaserCornerExtractionApp:
                 row=_row, column=1, padx=4
             )
             _row += 1
+        # Aperture must be one of 1, 3, 5, 7 — use Combobox to avoid invalid values
+        tk.Label(self._pf_harris, text="光圈大小:", bg="#ecf0f1", font=("Arial", 9)).grid(
+            row=_row, column=0, sticky="w", pady=2
+        )
+        self._p_aperture = tk.IntVar(value=3)
+        ttk.Combobox(
+            self._pf_harris, textvariable=self._p_aperture,
+            values=[1, 3, 5, 7], state="readonly", width=9,
+        ).grid(row=_row, column=1, padx=4)
 
         # Shi-Tomasi params
         self._pf_shi = tk.LabelFrame(af, text="Shi-Tomasi 参数", bg="#ecf0f1", font=("Arial", 9), padx=4, pady=4)
@@ -304,6 +363,32 @@ class LaserCornerExtractionApp:
             self._pf_fast, text="非极大值抑制", variable=self._p_nonmax,
             bg="#ecf0f1", font=("Arial", 9),
         ).grid(row=1, column=0, columnspan=2, sticky="w")
+
+        # ORB params
+        self._pf_orb = tk.LabelFrame(af, text="ORB 参数", bg="#ecf0f1", font=("Arial", 9), padx=4, pady=4)
+        for _r, (label, var_name, default, dtype) in enumerate([
+            ("最大特征数:", "_p_orb_n",     500,  int),
+            ("层数:",       "_p_orb_levels", 8,    int),
+        ]):
+            tk.Label(self._pf_orb, text=label, bg="#ecf0f1", font=("Arial", 9)).grid(
+                row=_r, column=0, sticky="w", pady=2
+            )
+            v = tk.IntVar(value=default)
+            setattr(self, var_name, v)
+            tk.Entry(self._pf_orb, textvariable=v, width=12).grid(row=_r, column=1, padx=4)
+
+        # 激光亮斑 params
+        self._pf_laser = tk.LabelFrame(af, text="激光亮斑参数", bg="#ecf0f1", font=("Arial", 9), padx=4, pady=4)
+        for _r, (label, var_name, default, dtype) in enumerate([
+            ("亮度阈值:", "_p_laser_bright", 180, int),
+            ("最小面积:", "_p_laser_minarea", 5,   int),
+        ]):
+            tk.Label(self._pf_laser, text=label, bg="#ecf0f1", font=("Arial", 9)).grid(
+                row=_r, column=0, sticky="w", pady=2
+            )
+            v = tk.IntVar(value=default)
+            setattr(self, var_name, v)
+            tk.Entry(self._pf_laser, textvariable=v, width=12).grid(row=_r, column=1, padx=4)
 
         self._on_algo_change(None)   # show Harris panel by default
 
@@ -335,8 +420,10 @@ class LaserCornerExtractionApp:
         self._count_var = tk.StringVar(value="角点数量: 0")
         tk.Label(rf, textvariable=self._count_var, bg="#ecf0f1",
                  font=("Arial", 11, "bold")).pack()
-        tk.Button(rf, text="保存结果", command=self._save_result,
+        tk.Button(rf, text="保存结果图像", command=self._save_result,
                   font=("Arial", 10), bg="#9b59b6", fg="white", width=22).pack(pady=3)
+        tk.Button(rf, text="导出角点 CSV", command=self._export_csv,
+                  font=("Arial", 10), bg="#16a085", fg="white", width=22).pack(pady=3)
         tk.Button(rf, text="清除结果", command=self._clear,
                   font=("Arial", 10), bg="#95a5a6", fg="white", width=22).pack(pady=3)
 
@@ -383,8 +470,14 @@ class LaserCornerExtractionApp:
     def _status(self, msg: str) -> None:
         self._status_var.set(msg)
 
+    def _show_result(self, img: np.ndarray) -> None:
+        """Switch to the result tab and render *img* on the processed canvas."""
+        self._nb.select(1)
+        self.root.update_idletasks()
+        self._show_image(img, self._canvas_proc, "_tk_img_proc")
+
     def _on_algo_change(self, _event) -> None:
-        for frame in (self._pf_harris, self._pf_shi, self._pf_fast):
+        for frame in (self._pf_harris, self._pf_shi, self._pf_fast, self._pf_orb, self._pf_laser):
             frame.pack_forget()
         algo = self._algo_var.get()
         if algo == "Harris":
@@ -393,6 +486,10 @@ class LaserCornerExtractionApp:
             self._pf_shi.pack(fill=tk.X, pady=4)
         elif algo == "FAST":
             self._pf_fast.pack(fill=tk.X, pady=4)
+        elif algo == "ORB":
+            self._pf_orb.pack(fill=tk.X, pady=4)
+        elif algo == "激光亮斑":
+            self._pf_laser.pack(fill=tk.X, pady=4)
 
     def _on_mouse(self, event) -> None:
         if self._src_img is not None:
@@ -402,8 +499,13 @@ class LaserCornerExtractionApp:
         """Fit *img* (BGR or GRAY) into *canvas* and keep a PhotoImage reference."""
         canvas.delete("all")
         canvas.update_idletasks()
-        cw = canvas.winfo_width() or 900
-        ch = canvas.winfo_height() or 650
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        # winfo_width/height returns 1 for hidden/un-rendered widgets — use safe fallback
+        if cw < 50:
+            cw = 900
+        if ch < 50:
+            ch = 650
 
         if img.ndim == 2:
             rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
@@ -469,9 +571,42 @@ class LaserCornerExtractionApp:
         self._status(f"结果已保存: {path}")
         messagebox.showinfo("保存成功", f"结果图像已保存至:\n{path}")
 
+    def _export_csv(self) -> None:
+        if not self._corners:
+            messagebox.showwarning("提示", "暂无角点数据，请先执行检测。")
+            return
+        path = filedialog.asksaveasfilename(
+            title="导出角点坐标",
+            defaultextension=".csv",
+            filetypes=[("CSV 文件", "*.csv"), ("所有文件", "*.*")],
+        )
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["id", "x", "y", "response"])
+            for i, ((x, y), r) in enumerate(
+                zip(self._corners, self._corner_responses or [0.0] * len(self._corners))
+            ):
+                writer.writerow([i + 1, x, y, f"{r:.6f}"])
+        self._status(f"已导出 {len(self._corners)} 个角点坐标: {path}")
+        messagebox.showinfo("导出成功", f"角点坐标已保存至:\n{path}")
+
     # ==================================================================
     # Detection algorithms
     # ==================================================================
+
+    def _preprocess(self, gray: np.ndarray) -> np.ndarray:
+        """Apply laser-image preprocessing pipeline to a grayscale image."""
+        out = gray.copy()
+        if self._p_blur.get():
+            k = int(self._p_blur_k.get())
+            k = k if k % 2 == 1 else k + 1   # kernel must be odd
+            out = cv2.GaussianBlur(out, (k, k), 0)
+        if self._p_clahe.get():
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            out = clahe.apply(out)
+        return out
 
     def _run_detection(self) -> None:
         self._detect(self._algo_var.get())
@@ -482,49 +617,131 @@ class LaserCornerExtractionApp:
             return
         try:
             gray = cv2.cvtColor(self._src_img, cv2.COLOR_BGR2GRAY)
+            proc = self._preprocess(gray)   # preprocessed grayscale
             result = self._src_img.copy()
             corners = []
+            responses = []
 
             if algorithm == "Harris":
-                block_size = int(self._p_block.get())
+                block_size = max(1, int(self._p_block.get()))
+                # Aperture is selected from Combobox — must be in {1, 3, 5, 7}
+                _valid_apertures = (1, 3, 5, 7)
+                aperture_raw = int(self._p_aperture.get())
+                aperture = min(_valid_apertures, key=lambda a: abs(a - aperture_raw))
                 k = float(self._p_k.get())
                 thresh = float(self._p_thresh.get())
-                gray_f = np.float32(gray)
-                dst = cv2.cornerHarris(gray_f, block_size, 3, k)
+
+                gray_f = np.float32(proc)
+                dst = cv2.cornerHarris(gray_f, block_size, aperture, k)
                 dst = cv2.dilate(dst, None)
-                mask = dst > thresh * dst.max()
-                result[mask] = [0, 0, 255]
-                ys, xs = np.where(mask)
-                corners = list(zip(xs.tolist(), ys.tolist()))
+
+                # Blend response heat-map onto result for visual context
+                dst_norm = cv2.normalize(dst, None, 0, 255, cv2.NORM_MINMAX, cv2.CV_8U)
+                heat = cv2.applyColorMap(dst_norm, cv2.COLORMAP_JET)
+                result = cv2.addWeighted(result, 0.75, heat, 0.25, 0)
+
+                # Connected-component NMS → proper corner centres
+                binary = (dst > thresh * dst.max()).astype(np.uint8)
+                _, _, _, centroids = cv2.connectedComponentsWithStats(binary)
+                centroid_pts = np.float32([[cx, cy] for cx, cy in centroids[1:]])   # skip background
+
+                # Sub-pixel refinement
+                if len(centroid_pts) > 0 and self._p_subpix.get():
+                    refined = cv2.cornerSubPix(
+                        proc, centroid_pts.reshape(-1, 1, 2), _SUBPIX_WIN, (-1, -1), _SUBPIX_CRITERIA
+                    )
+                    centroid_pts = refined.reshape(-1, 2)
+
+                h_dst, w_dst = dst.shape
+                for cx, cy in centroid_pts:
+                    x, y = int(round(float(cx))), int(round(float(cy)))
+                    # Clamp to valid image coordinates before response lookup
+                    xi, yi = max(0, min(x, w_dst - 1)), max(0, min(y, h_dst - 1))
+                    resp = float(dst[yi, xi])
+                    corners.append((x, y))
+                    responses.append(resp)
+                    _draw_corner(result, x, y, (0, 255, 255))   # cyan crosshair
 
             elif algorithm == "Shi-Tomasi":
                 max_c = int(self._p_max_corners.get())
                 quality = float(self._p_quality.get())
                 min_d = int(self._p_min_dist.get())
-                pts = cv2.goodFeaturesToTrack(gray, max_c, quality, min_d)
+                pts = cv2.goodFeaturesToTrack(proc, max_c, quality, min_d)
                 if pts is not None:
-                    for pt in np.intp(pts):
-                        x, y = pt.ravel()
-                        cv2.circle(result, (x, y), 5, (0, 255, 0), -1)
-                        corners.append((int(x), int(y)))
+                    # Sub-pixel refinement
+                    if self._p_subpix.get():
+                        pts = cv2.cornerSubPix(proc, pts, _SUBPIX_WIN, (-1, -1), _SUBPIX_CRITERIA)
+                    for pt in pts:
+                        x, y = int(round(pt[0][0])), int(round(pt[0][1]))
+                        corners.append((x, y))
+                        responses.append(1.0)
+                        _draw_corner(result, x, y, (0, 255, 0))   # green crosshair
 
             elif algorithm == "FAST":
                 fast = cv2.FastFeatureDetector_create(
                     threshold=int(self._p_fast_thresh.get()),
                     nonmaxSuppression=bool(self._p_nonmax.get()),
                 )
-                kps = fast.detect(gray, None)
+                kps = fast.detect(proc, None)
+                # Sort by response strength descending
+                kps = sorted(kps, key=lambda kp: kp.response, reverse=True)
+                max_resp = kps[0].response if kps else 1.0
                 for kp in kps:
                     x, y = int(kp.pt[0]), int(kp.pt[1])
-                    cv2.circle(result, (x, y), 4, (255, 0, 0), -1)
+                    # Scale marker radius by relative response
+                    r = max(4, int(6 * kp.response / max_resp) + 4)
+                    _draw_corner(result, x, y, (255, 100, 0), r=r)
                     corners.append((x, y))
+                    responses.append(float(kp.response))
+
+            elif algorithm == "ORB":
+                n = int(self._p_orb_n.get())
+                levels = int(self._p_orb_levels.get())
+                orb = cv2.ORB_create(nfeatures=n, nlevels=levels)
+                kps = orb.detect(proc, None)
+                kps = sorted(kps, key=lambda kp: kp.response, reverse=True)
+                max_resp = kps[0].response if kps else 1.0
+                for kp in kps:
+                    x, y = int(kp.pt[0]), int(kp.pt[1])
+                    r = max(4, int(8 * kp.response / max_resp) + 3)
+                    _draw_corner(result, x, y, (255, 0, 200), r=r)
+                    corners.append((x, y))
+                    responses.append(float(kp.response))
+
+            elif algorithm == "激光亮斑":
+                # Isolate bright laser spots via threshold + morphology → contour corners
+                bright_thresh = int(self._p_laser_bright.get())
+                min_area = int(self._p_laser_minarea.get())
+                _, binary = cv2.threshold(proc, bright_thresh, 255, cv2.THRESH_BINARY)
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+                binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+                contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                # Show threshold overlay in blue channel
+                overlay = result.copy()
+                overlay[binary > 0] = (overlay[binary > 0] * 0.5 + np.array([80, 0, 0])).clip(0, 255).astype(np.uint8)
+                result = cv2.addWeighted(result, 0.7, overlay, 0.3, 0)
+                for cnt in contours:
+                    area = cv2.contourArea(cnt)
+                    if area < min_area:
+                        continue
+                    # Sub-pixel centroid
+                    M = cv2.moments(cnt)
+                    if M["m00"] == 0:
+                        continue
+                    cx = M["m10"] / M["m00"]
+                    cy = M["m01"] / M["m00"]
+                    x, y = int(round(cx)), int(round(cy))
+                    r = max(4, int(np.sqrt(area / np.pi)))
+                    _draw_corner(result, x, y, (0, 200, 255), r=r)
+                    corners.append((x, y))
+                    responses.append(float(area))
 
             self._result_img = result
             self._corners = corners
-            self._show_image(result, self._canvas_proc, "_tk_img_proc")
+            self._corner_responses = responses
+            self._show_result(result)
             self._count_var.set(f"角点数量: {len(corners)}")
-            self._status(f"{algorithm} 角点检测完成 – 检测到 {len(corners)} 个角点")
-            self._nb.select(1)
+            self._status(f"{algorithm} 检测完成 – 检测到 {len(corners)} 个角点")
 
         except Exception as exc:
             messagebox.showerror("错误", f"角点检测失败:\n{exc}")
@@ -537,10 +754,9 @@ class LaserCornerExtractionApp:
             gray = cv2.cvtColor(self._src_img, cv2.COLOR_BGR2GRAY)
             edges = cv2.Canny(gray, int(self._p_canny_low.get()), int(self._p_canny_high.get()))
             self._result_img = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
-            self._show_image(edges, self._canvas_proc, "_tk_img_proc")
+            self._show_result(edges)
             count = int(np.count_nonzero(edges))
             self._status(f"Canny 边缘检测完成 – 边缘像素数: {count}")
-            self._nb.select(1)
         except Exception as exc:
             messagebox.showerror("错误", f"边缘检测失败:\n{exc}")
 
@@ -589,18 +805,27 @@ class LaserCornerExtractionApp:
     def _help(self) -> None:
         messagebox.showinfo(
             "使用说明",
-            "激光角点提取系统 – 使用说明\n\n"
+            "激光角点提取系统 v2.0 – 使用说明\n\n"
             "1. 打开图像：点击「打开图像」或使用 Ctrl+O\n"
-            "2. 选择算法：从下拉菜单选择角点检测算法\n"
-            "3. 调整参数：根据需要修改算法参数\n"
-            "4. 执行检测：点击「执行角点检测」按钮\n"
-            "5. 查看结果：在「处理结果」标签页查看\n"
-            "6. 保存结果：点击「保存结果」或使用 Ctrl+S\n\n"
+            "2. 预处理：开启高斯模糊 / CLAHE 增强（推荐激光图像）\n"
+            "3. 选择算法：从下拉菜单选择角点检测算法\n"
+            "4. 调整参数：根据需要修改算法参数\n"
+            "5. 执行检测：点击「执行角点检测」按钮\n"
+            "6. 查看结果：在「处理结果」标签页查看\n"
+            "7. 导出结果：保存图像或导出角点坐标 CSV\n\n"
             "支持的算法：\n"
-            "• Harris       – 经典角点检测算法\n"
-            "• Shi-Tomasi   – 改进的 Harris 算法\n"
-            "• FAST         – 高速角点检测算法\n"
-            "• Canny        – 边缘提取算法\n\n"
+            "• Harris       – 经典角点检测，含热力图叠加\n"
+            "• Shi-Tomasi   – 改进的 Harris，精度更高\n"
+            "• FAST         – 高速角点检测\n"
+            "• ORB          – 鲁棒特征检测算法\n"
+            "• 激光亮斑     – 针对激光点/线的专用检测\n"
+            "• Canny        – 边缘提取\n\n"
+            "v2.0 新功能：\n"
+            "  • 亚像素精化 (Harris / Shi-Tomasi)\n"
+            "  • 高斯模糊 + CLAHE 预处理\n"
+            "  • Harris 热力图叠加显示\n"
+            "  • CSV 角点坐标导出\n"
+            "  • ORB 与激光亮斑新算法\n\n"
             "快捷键：\n"
             "  Ctrl+O   打开图像\n"
             "  Ctrl+S   保存结果\n"
@@ -610,9 +835,10 @@ class LaserCornerExtractionApp:
     def _about(self) -> None:
         messagebox.showinfo(
             "关于",
-            "激光角点提取系统  v1.0\n\n"
+            "激光角点提取系统  v2.0\n\n"
             "基于 OpenCV 的激光图像角点提取软件\n"
-            "支持 Harris、Shi-Tomasi、FAST 等多种算法\n\n"
+            "支持 Harris（热力图+亚像素）、Shi-Tomasi（亚像素）、\n"
+            "FAST、ORB、激光亮斑等多种算法\n\n"
             "技术栈:\n"
             "  Python 3 · OpenCV · tkinter · NumPy · Matplotlib\n\n"
             "版权所有 © 2024",
