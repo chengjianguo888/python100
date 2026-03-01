@@ -550,7 +550,8 @@ class MainApp:
                         data.append(nums[:2])
             if not data:
                 messagebox.showerror("错误", "文件中未找到有效数值列对。\n"
-                                     "请确保文件每行含 X Y 两列数值。\n\n"
+                                     "请确保文件每行含 X Y 两列数值，\n"
+                                     "支持逗号/空格/Tab分隔，# 开头为注释行。\n\n"
                                      "如需处理图片文件（JPG/PNG），请在打开对话框中\n"
                                      "选择'图片文件'类型。\n"
                                      "To load images, select 'Image files' in the dialog.")
