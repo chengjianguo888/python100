@@ -271,12 +271,15 @@ class MainApp:
         "线段分割法 (Line-Segment)":    "line_segment",
     }
 
+    _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
+
     def __init__(self, root: tk.Tk, username: str):
         self.root = root
         self.username = username
         self.points: np.ndarray | None = None
         self.corners: np.ndarray | None = None
         self.filepath: str = ""
+        self._bg_image: np.ndarray | None = None
 
         self.root.title("🔬 激光角点提取软件  –  Laser Corner Extraction System")
         # Maximize window (cross-platform)
@@ -517,10 +520,16 @@ class MainApp:
     # ── open file ───────────────────────────────────────────────────────────
     def _open_file(self):
         path = filedialog.askopenfilename(
-            title="打开激光数据文件  Open laser data file",
-            filetypes=[("文本/CSV文件", "*.txt *.csv"),
+            title="打开数据/图片文件  Open data/image file",
+            filetypes=[("支持的文件", "*.txt *.csv *.jpg *.jpeg *.png *.bmp *.tif *.tiff"),
+                       ("文本/CSV文件", "*.txt *.csv"),
+                       ("图片文件", "*.jpg *.jpeg *.png *.bmp *.tif *.tiff"),
                        ("所有文件", "*.*")])
         if not path:
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext in self._IMAGE_EXTS:
+            self._open_image(path)
             return
         try:
             data = []
@@ -540,7 +549,10 @@ class MainApp:
                         pass
             if not data:
                 messagebox.showerror("错误", "文件中未找到有效数值列对。\n"
-                                     "请确保文件每行含 X Y 两列数值。")
+                                     "请确保文件每行含 X Y 两列数值。\n\n"
+                                     "如需处理图片文件（JPG/PNG），请在打开对话框中\n"
+                                     "选择'图片文件'类型。\n"
+                                     "To load images, select 'Image files' in the dialog.")
                 return
             pts = np.array(data, dtype=float)
             # auto-detect polar (angle_deg, range) vs cartesian (x, y)
@@ -553,6 +565,7 @@ class MainApp:
                     pts = np.column_stack([r * np.cos(ang), r * np.sin(ang)])
             self.points   = pts
             self.filepath = path
+            self._bg_image = None
             self._file_label.config(
                 text=os.path.basename(path), foreground="black")
             self._points_label.config(text=f"点数: {len(pts)}")
@@ -560,6 +573,61 @@ class MainApp:
             self._draw()
             self._log(f"已加载文件: {os.path.basename(path)}  ({len(pts)} 点)")
             self._status("文件已加载  File loaded")
+        except Exception as exc:
+            messagebox.showerror("读取错误", str(exc))
+
+    # ── open image file ─────────────────────────────────────────────────────
+    def _open_image(self, path: str):
+        """Load an image file and extract edge points as a 2-D point cloud."""
+        try:
+            import matplotlib.image as mpimg
+            from scipy.ndimage import sobel
+
+            img = mpimg.imread(path)
+            # Convert to grayscale float in [0, 1]
+            if img.ndim == 3:
+                gray = np.mean(img[:, :, :3], axis=2)
+            else:
+                gray = img.astype(float)
+            if gray.max() > 1:
+                gray = gray / 255.0
+
+            # Edge detection via Sobel magnitude
+            sx = sobel(gray, axis=0)
+            sy = sobel(gray, axis=1)
+            edge_mag = np.hypot(sx, sy)
+
+            thresh = np.mean(edge_mag) + np.std(edge_mag)
+            rows, cols = np.where(edge_mag > thresh)
+
+            if len(cols) == 0:
+                messagebox.showerror(
+                    "错误", "未能从图片中检测到有效边缘点。\n"
+                    "No valid edge points detected from the image.")
+                return
+
+            # Use image coordinates: x = col, y = row (top-down)
+            pts = np.column_stack([cols.astype(float), rows.astype(float)])
+
+            # Sub-sample when there are too many edge pixels
+            max_pts = 10000
+            if len(pts) > max_pts:
+                idx = np.random.default_rng(0).choice(
+                    len(pts), max_pts, replace=False)
+                idx.sort()
+                pts = pts[idx]
+
+            self.points = pts
+            self.filepath = path
+            self._bg_image = gray
+            self._file_label.config(
+                text=os.path.basename(path), foreground="black")
+            self._points_label.config(text=f"点数: {len(pts)}")
+            self._clear_results()
+            self._draw()
+            self._log(f"已加载图片: {os.path.basename(path)}  "
+                       f"({len(pts)} 边缘点)")
+            self._status("图片已加载  Image loaded")
         except Exception as exc:
             messagebox.showerror("读取错误", str(exc))
 
@@ -603,6 +671,7 @@ class MainApp:
         y = ranges * np.sin(angles)
         self.points = np.column_stack([x, y])
         self.filepath = ""
+        self._bg_image = None
         self._file_label.config(text="演示数据 (sample)", foreground="#27AE60")
         self._points_label.config(text=f"点数: {len(self.points)}")
         self._clear_results()
@@ -661,9 +730,19 @@ class MainApp:
     # ── drawing ─────────────────────────────────────────────────────────────
     def _draw(self):
         self._ax.clear()
-        self._ax.set_title("激光扫描点云  /  Laser Scan Point Cloud", fontsize=11)
-        self._ax.set_xlabel("X (m)")
-        self._ax.set_ylabel("Y (m)")
+        if self._bg_image is not None:
+            h, w = self._bg_image.shape[:2]
+            self._ax.imshow(self._bg_image, cmap='gray', alpha=0.5,
+                            extent=[0, w, h, 0], aspect='equal')
+            self._ax.set_title("图片边缘点云  /  Image Edge Points",
+                               fontsize=11)
+            self._ax.set_xlabel("X (px)")
+            self._ax.set_ylabel("Y (px)")
+        else:
+            self._ax.set_title("激光扫描点云  /  Laser Scan Point Cloud",
+                               fontsize=11)
+            self._ax.set_xlabel("X (m)")
+            self._ax.set_ylabel("Y (m)")
         self._ax.grid(True, alpha=0.3)
         self._ax.set_aspect("equal")
 
@@ -789,7 +868,7 @@ class MainApp:
             "版本 Version: 1.0.0\n"
             "算法: 曲率法 / Harris / 方位角法 / 线段分割法\n"
             "Algorithms: Curvature / Harris / Bearing-Angle / Line-Segment\n\n"
-            "支持格式: TXT / CSV  (X Y 列 or Angle Range)\n"
+            "支持格式: TXT / CSV / JPG / PNG / BMP / TIFF\n"
             "Export: CSV / JSON")
 
     def _show_guide(self):
@@ -805,9 +884,11 @@ class MainApp:
 • TXT / CSV 文件，每行两列数值：
   - 笛卡尔坐标: X(m)  Y(m)
   - 极坐标: Angle(deg)  Range(m)
+• 图片文件 (JPG / PNG / BMP / TIFF)：
+  - 自动提取图片边缘点作为二维点云
 
 【操作步骤 / Steps】
-1. 点击"打开"加载数据文件，或点击"演示数据"生成测试数据。
+1. 点击"打开"加载数据文件或图片，或点击"演示数据"生成测试数据。
 2. 在左侧选择角点提取算法：
    • 曲率法 (Curvature): 适合一般场景
    • Harris 角点检测: 经典角点算法
