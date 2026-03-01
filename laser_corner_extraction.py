@@ -11,6 +11,19 @@ from tkinter import ttk, filedialog, messagebox
 import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')
+# Support Chinese characters in matplotlib plots (cross-platform font fallbacks)
+matplotlib.rcParams['font.sans-serif'] = [
+    'SimHei',               # Windows (built-in)
+    'Microsoft YaHei',      # Windows (built-in)
+    'PingFang SC',          # macOS (built-in)
+    'Heiti SC',             # macOS (built-in)
+    'STHeiti',              # macOS older
+    'WenQuanYi Micro Hei',  # Linux (apt: fonts-wqy-microhei)
+    'Noto Sans CJK SC',     # Linux / macOS (apt: fonts-noto-cjk)
+    'Source Han Sans CN',
+    'DejaVu Sans',          # fallback (no CJK, but avoids crash)
+]
+matplotlib.rcParams['axes.unicode_minus'] = False  # prevent minus sign garbling
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 import os
@@ -89,7 +102,7 @@ class LoginWindow:
                    command=self._on_close).pack(side=tk.LEFT, padx=6)
 
         tk.Label(outer, text="演示账号: admin / admin123  |  user / user123",
-                 bg="#2C3E50", fg="#7F8C8D", font=("Arial", 8)).pack(pady=(12, 0))
+                 bg="#2C3E50", fg="#F0E68C", font=("Arial", 9, "bold")).pack(pady=(12, 0))
 
     def _login(self):
         username = self._user_var.get().strip()
