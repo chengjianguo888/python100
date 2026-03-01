@@ -11,6 +11,19 @@ from tkinter import ttk, filedialog, messagebox
 import numpy as np
 import matplotlib
 matplotlib.use('TkAgg')
+# Support Chinese characters in matplotlib plots (cross-platform font fallbacks)
+matplotlib.rcParams['font.sans-serif'] = [
+    'SimHei',               # Windows (built-in)
+    'Microsoft YaHei',      # Windows (built-in)
+    'PingFang SC',          # macOS (built-in)
+    'Heiti SC',             # macOS (built-in)
+    'STHeiti',              # macOS older
+    'WenQuanYi Micro Hei',  # Linux (apt: fonts-wqy-microhei)
+    'Noto Sans CJK SC',     # Linux / macOS (apt: fonts-noto-cjk)
+    'Source Han Sans CN',
+    'DejaVu Sans',          # fallback (no CJK, but avoids crash)
+]
+matplotlib.rcParams['axes.unicode_minus'] = False  # prevent minus sign garbling
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 import os
