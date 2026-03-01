@@ -271,7 +271,7 @@ class MainApp:
         "线段分割法 (Line-Segment)":    "line_segment",
     }
 
-    _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.gif'}
+    _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
 
     def __init__(self, root: tk.Tk, username: str):
         self.root = root
