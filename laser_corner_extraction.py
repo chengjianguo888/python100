@@ -89,7 +89,7 @@ class LoginWindow:
                    command=self._on_close).pack(side=tk.LEFT, padx=6)
 
         tk.Label(outer, text="演示账号: admin / admin123  |  user / user123",
-                 bg="#2C3E50", fg="#7F8C8D", font=("Arial", 8)).pack(pady=(12, 0))
+                 bg="#2C3E50", fg="#F0E68C", font=("Arial", 9, "bold")).pack(pady=(12, 0))
 
     def _login(self):
         username = self._user_var.get().strip()
