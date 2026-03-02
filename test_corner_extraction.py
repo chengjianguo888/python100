@@ -211,7 +211,7 @@ def test_bearing_angle_not_degenerate():
     pts = _make_sample_room()
     r = LaserCornerExtractor.extract(pts, method="bearing_angle")
     assert len(r) > 1, (
-        f"Bearing-angle found only {len(r)} corner – likely still inverted")
+        f"Bearing-angle found only {len(r)} corners – likely still inverted")
     print("PASS: test_bearing_angle_not_degenerate")
 
 
