@@ -534,22 +534,24 @@ class MainApp:
         try:
             data = []
             with open(path, newline="", encoding="utf-8-sig") as f:
-                reader = csv.reader(f)
-                for row in reader:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith('#'):
+                        continue
+                    # Support comma / space / tab delimited files
+                    tokens = stripped.replace(',', ' ').split()
                     nums = []
-                    for cell in row:
+                    for token in tokens:
                         try:
-                            nums.append(float(cell.strip()))
+                            nums.append(float(token))
                         except ValueError:
                             pass
                     if len(nums) >= 2:
                         data.append(nums[:2])
-                    elif len(nums) == 1:
-                        # polar single-column (just range) – skip header
-                        pass
             if not data:
                 messagebox.showerror("错误", "文件中未找到有效数值列对。\n"
-                                     "请确保文件每行含 X Y 两列数值。\n\n"
+                                     "请确保文件每行含 X Y 两列数值，\n"
+                                     "支持逗号/空格/Tab分隔，# 开头为注释行。\n\n"
                                      "如需处理图片文件（JPG/PNG），请在打开对话框中\n"
                                      "选择'图片文件'类型。\n"
                                      "To load images, select 'Image files' in the dialog.")
