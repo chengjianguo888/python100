@@ -149,7 +149,7 @@ class LaserCornerExtractor:
         elif method == "harris":
             idx = LaserCornerExtractor._harris(x, y, sigma, threshold, min_distance)
         elif method == "bearing_angle":
-            idx = LaserCornerExtractor._bearing_angle(x, y, threshold, min_distance)
+            idx = LaserCornerExtractor._bearing_angle(x, y, sigma, threshold, min_distance)
         elif method == "line_segment":
             idx = LaserCornerExtractor._line_segment(x, y, threshold, min_distance)
         else:
@@ -188,17 +188,20 @@ class LaserCornerExtractor:
 
     # ── method 3: Bearing-Angle ─────────────────────────────────────────────
     @staticmethod
-    def _bearing_angle(x, y, threshold, min_dist):
-        angles = np.zeros(len(x))
-        for i in range(1, len(x) - 1):
-            v1 = np.array([x[i-1]-x[i], y[i-1]-y[i]])
-            v2 = np.array([x[i+1]-x[i], y[i+1]-y[i]])
+    def _bearing_angle(x, y, sigma, threshold, min_dist):
+        xs = gaussian_filter1d(x.astype(float), sigma)
+        ys = gaussian_filter1d(y.astype(float), sigma)
+        deviation = np.zeros(len(xs))
+        for i in range(1, len(xs) - 1):
+            v1 = np.array([xs[i-1]-xs[i], ys[i-1]-ys[i]])
+            v2 = np.array([xs[i+1]-xs[i], ys[i+1]-ys[i]])
             n1, n2 = np.linalg.norm(v1), np.linalg.norm(v2)
             if n1 > 1e-10 and n2 > 1e-10:
                 cos_a = np.clip(np.dot(v1, v2)/(n1*n2), -1, 1)
-                angles[i] = np.degrees(np.arccos(cos_a))
+                deviation[i] = 180.0 - np.degrees(np.arccos(cos_a))
+        deviation = gaussian_filter1d(deviation, sigma)
         thresh = threshold * 180.0          # threshold as fraction of 180°
-        return LaserCornerExtractor._find_peaks(angles, thresh, min_dist)
+        return LaserCornerExtractor._find_peaks(deviation, thresh, min_dist)
 
     # ── method 4: Line-Segment intersection ─────────────────────────────────
     @staticmethod
@@ -207,8 +210,10 @@ class LaserCornerExtractor:
         n = len(x)
         if n < 6:
             return np.array([], dtype=int)
+        extent = max(x.max() - x.min(), y.max() - y.min())
+        tol = threshold * extent if extent > 0 else threshold
         segments = LaserCornerExtractor._recursive_split(
-            x, y, 0, n-1, threshold * 0.5)
+            x, y, 0, n-1, tol)
         seg_endpoints = set()
         for s, e in segments:
             seg_endpoints.add(s)
